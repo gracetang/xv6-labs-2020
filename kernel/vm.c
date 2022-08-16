@@ -381,23 +381,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
-
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -407,40 +391,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
-
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
-
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
-
-    srcva = va0 + PGSIZE;
-  }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
-  }
+  return copyinstr_new(pagetable, dst, srcva, max);
 }
 
 void
@@ -505,8 +456,6 @@ procvminit()
   procvmmap(kpagetable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
   // virtio mmio disk interface
   procvmmap(kpagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
-  // CLINT
-  procvmmap(kpagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
   // PLIC
   procvmmap(kpagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
   // map kernel text executable and read-only.
@@ -525,4 +474,48 @@ void
 procinithart(pagetable_t pgtbl){
   w_satp(MAKE_SATP(pgtbl));
   sfence_vma();
+}
+
+// Map part of src mapping to dst
+// 只拷貝頁表象, 不拷貝實際物理內存
+// PTE的標誌位設置PTE_U的話要改, 要不然進入kernel無法使用
+int
+kvmcopymap(pagetable_t src, pagetable_t dst, uint64 start, uint64 sz) {
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+  
+  // PGROUNDUP: prevent re-mapping already mapped pages(ex: while growproc)
+  for(i = PGROUNDUP(start); i < start + sz; i += PGSIZE) {
+    if((pte = walk(src, i, 0)) == 0)
+      panic("kvmcopymap: pte should exit");
+    if((*pte & PTE_V) == 0)
+      panic("kvmcopymap: page not present");
+    pa = PTE2PA(*pte);
+    // `& ~PTE_U` 將權限設置為非用戶頁
+    // 否則RISC-V中內核無法直接訪問用戶頁的
+    flags = (PTE_FLAGS(*pte) & (~PTE_U));
+    if(mappages(dst, i, PGSIZE, pa, flags) != 0) {
+      goto err;    
+    }
+  }
+  return 0;
+
+  err:
+    uvmunmap(dst, PGROUNDUP(start), (i - PGROUNDUP(start)) / PGSIZE, 0);
+    return -1;
+}
+
+// Mimic uvmdealloc. 將程序內存由oldsz縮減到newsz, 區別在於不釋放實際內存
+// 用于内核页表内程序内存映射与用户页表程序内存映射之间的同步
+uint64
+kvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
+{
+  if(newsz >= oldsz)
+    return oldsz;
+  if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)) {
+    int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+    uvmunmap(pagetable, PGROUNDUP(newsz), npages, 0);
+  }
+  return newsz;
 }
