@@ -132,3 +132,15 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+void backtrace(void){
+  uint64 fp = r_fp();
+  // stack由高(靠上)地址往低地址長(靠下)
+  // fp - 8 : return addr
+  // fp - 16: previous addr 指向上ㄧ層stack frame的fp開始地址
+  while (fp < PGROUNDUP(fp)) {
+    uint64 ra = *(uint64*)(fp - 8); // position of return addr (ra)
+    printf("%p\n", ra);
+    fp = *(uint64*) (fp - 16); // previous fp
+  }
+}
