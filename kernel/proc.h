@@ -94,6 +94,13 @@ struct proc {
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
 
+  // alarm test
+  int ainterval;       //alarm interval (0 for disabled)
+  void(*ahandler)();   // alarm handler
+  int atick;           // How many ticks left before next alarm goes off
+  struct trapframe *atrapframe; // A copy of trapframe right before running alarm_handler
+  int agoingoff;       // Is an alarm currently going off and hasn't not yet returned? (prevent re-entrance of alarm_handler)
+
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
