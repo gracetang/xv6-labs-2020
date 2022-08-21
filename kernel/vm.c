@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -311,7 +313,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -319,14 +320,19 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+
+    // In cow, clear PTE_W, add PTE_COW
+    *pte = (*pte & ~PTE_W) | PTE_COW;
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    // Map physical parent page to child directly (cow)
+    // Since the write flag has been wiped out, child page
+    // won't have write flag.
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
       goto err;
     }
+    // increase the ref count of the page
+    krefpage((void*)pa);
   }
   return 0;
 
@@ -355,6 +361,9 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+
+  if(uvmcheckcowpage(dstva))
+    uvmcowcopy(dstva);
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
@@ -439,4 +448,42 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int uvmcheckcowpage(uint64 va)
+{
+   
+  pte_t *pte;
+  struct proc *p = myproc();
+
+  return (va < p->sz) && 
+         ((pte = walk(p->pagetable, va, 0)) != 0) &&
+         (*pte & PTE_V) &&
+         (*pte & PTE_COW);
+}
+
+// Copy the cow page and make it writeable
+int uvmcowcopy(uint64 va)
+{
+   
+  pte_t *pte;
+  struct proc *p = myproc();
+
+  if((pte = walk(p->pagetable, va, 0)) == 0)
+    panic("uvmcowcopy: walk\n");
+  
+  // Copy the cow page
+  // No copy will happen if the page ref count == 1
+  uint64 pa = PTE2PA(*pte);
+  uint64 new = (uint64)kcopy_n_deref((void*)pa);
+  if (new == 0)
+    return -1;
+  
+  // Modify flag: Writable & remove Cow
+  uint64 flags = ((PTE_FLAGS(*pte) | PTE_W) & (~PTE_COW) );
+
+  uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 0);
+  if(mappages(p->pagetable, va, 1, new, flags) == -1)
+    panic("uvmcowcopy: mappages");
+  return 0;
 }
